@@ -22,6 +22,7 @@ button:hover{background:#2980b9;}
     <div class="row"><label>Bounds Z (±):</label><input type="number" id="bz" value="5"></div>
     <div class="row"><label>Initial Balls:</label><input type="number" id="ballCount" value="20"></div>
     <div class="row"><label>Camera Dist:</label><input type="range" id="camDist" min="5" max="50" value="15"></div>
+    <div class="row"><label>FPS:</label><span id="fpsDisplay">0</span></div>
     <button id="resetBtn">Reset Simulation</button>
 </div>
 <canvas id="c"></canvas>
@@ -33,6 +34,7 @@ const byInput = document.getElementById("by");
 const bzInput = document.getElementById("bz");
 const bcInput = document.getElementById("ballCount");
 const cdInput = document.getElementById("camDist");
+const fpsDisplay = document.getElementById("fpsDisplay");
 const resetBtn = document.getElementById("resetBtn");
 
 canvas.width = 1000;
@@ -310,9 +312,21 @@ canvas.addEventListener("click",spawnBall);
 const uProj=gl.getUniformLocation(prog,"uProj");
 const uView=gl.getUniformLocation(prog,"uView");
 
-function loop(){
+let lastTime = 0;
+let frameCount = 0;
+let lastFpsUpdate = 0;
+
+function loop(now){
 
     step(0.016);
+
+    // FPS calculation
+    frameCount++;
+    if (now - lastFpsUpdate >= 1000) {
+        fpsDisplay.innerText = frameCount;
+        frameCount = 0;
+        lastFpsUpdate = now;
+    }
 
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
 
