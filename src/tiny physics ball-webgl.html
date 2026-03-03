@@ -21,6 +21,7 @@ button:hover{background:#2980b9;}
     <div class="row"><label>Bounds Y (±):</label><input type="number" id="by" value="5"></div>
     <div class="row"><label>Bounds Z (±):</label><input type="number" id="bz" value="5"></div>
     <div class="row"><label>Initial Balls:</label><input type="number" id="ballCount" value="20"></div>
+    <div class="row"><label>Max Balls:</label><input type="number" id="maxBallsInput" value="1000"></div>
     <div class="row"><label>Camera Dist:</label><input type="range" id="camDist" min="5" max="50" value="15"></div>
     <div class="row"><label>FPS:</label><span id="fpsDisplay">0</span></div>
     <button id="resetBtn">Reset Simulation</button>
@@ -33,6 +34,7 @@ const bxInput = document.getElementById("bx");
 const byInput = document.getElementById("by");
 const bzInput = document.getElementById("bz");
 const bcInput = document.getElementById("ballCount");
+const mbInput = document.getElementById("maxBallsInput");
 const cdInput = document.getElementById("camDist");
 const fpsDisplay = document.getElementById("fpsDisplay");
 const resetBtn = document.getElementById("resetBtn");
@@ -146,27 +148,32 @@ gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(sphere.indices),gl.STATIC_
 
 // ================= INSTANCE BUFFER =================
 
-const MAX_BALLS = 1000;
+let MAX_BALLS = parseInt(mbInput.value) || 1000;
 const STRIDE = 7; // x y z scale r g b
-const instanceData = new Float32Array(MAX_BALLS * STRIDE);
+let instanceData = new Float32Array(MAX_BALLS * STRIDE);
 const instanceBuf = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER,instanceBuf);
-gl.bufferData(gl.ARRAY_BUFFER,instanceData,gl.DYNAMIC_DRAW);
 
-// position
-gl.enableVertexAttribArray(2);
-gl.vertexAttribPointer(2,3,gl.FLOAT,false,STRIDE*4,0);
-gl.vertexAttribDivisor(2,1);
+function setupInstanceAttributes() {
+    gl.bindBuffer(gl.ARRAY_BUFFER,instanceBuf);
+    gl.bufferData(gl.ARRAY_BUFFER,instanceData,gl.DYNAMIC_DRAW);
 
-// scale
-gl.enableVertexAttribArray(3);
-gl.vertexAttribPointer(3,1,gl.FLOAT,false,STRIDE*4,3*4);
-gl.vertexAttribDivisor(3,1);
+    // position
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2,3,gl.FLOAT,false,STRIDE*4,0);
+    gl.vertexAttribDivisor(2,1);
 
-// color
-gl.enableVertexAttribArray(4);
-gl.vertexAttribPointer(4,3,gl.FLOAT,false,STRIDE*4,4*4);
-gl.vertexAttribDivisor(4,1);
+    // scale
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3,1,gl.FLOAT,false,STRIDE*4,3*4);
+    gl.vertexAttribDivisor(3,1);
+
+    // color
+    gl.enableVertexAttribArray(4);
+    gl.vertexAttribPointer(4,3,gl.FLOAT,false,STRIDE*4,4*4);
+    gl.vertexAttribDivisor(4,1);
+}
+
+setupInstanceAttributes();
 
 // ================= MATRIX =================
 
@@ -227,6 +234,10 @@ function spawnBall(){
 }
 
 function init() {
+    MAX_BALLS = parseInt(mbInput.value) || 1000;
+    instanceData = new Float32Array(MAX_BALLS * STRIDE);
+    setupInstanceAttributes();
+    
     balls = [];
     const count = parseInt(bcInput.value) || 20;
     for(let i=0; i<count; i++) spawnBall();
@@ -312,7 +323,6 @@ canvas.addEventListener("click",spawnBall);
 const uProj=gl.getUniformLocation(prog,"uProj");
 const uView=gl.getUniformLocation(prog,"uView");
 
-let lastTime = 0;
 let frameCount = 0;
 let lastFpsUpdate = 0;
 
@@ -337,7 +347,8 @@ function loop(now){
     gl.uniformMatrix4fv(uProj,false,new Float32Array(proj));
     gl.uniformMatrix4fv(uView,false,new Float32Array(view));
 
-    for(let i=0;i<balls.length;i++){
+    const renderCount = Math.min(balls.length, MAX_BALLS);
+    for(let i=0; i<renderCount; i++){
         instanceData[i*STRIDE+0]=balls[i].x;
         instanceData[i*STRIDE+1]=balls[i].y;
         instanceData[i*STRIDE+2]=balls[i].z;
@@ -348,7 +359,7 @@ function loop(now){
     }
 
     gl.bindBuffer(gl.ARRAY_BUFFER,instanceBuf);
-    gl.bufferSubData(gl.ARRAY_BUFFER,0,instanceData);
+    gl.bufferSubData(gl.ARRAY_BUFFER,0,instanceData.subarray(0, renderCount * STRIDE));
 
     gl.bindVertexArray(vao);
 
@@ -357,7 +368,7 @@ function loop(now){
         sphere.indices.length,
         gl.UNSIGNED_SHORT,
         0,
-        balls.length
+        renderCount
     );
 
     requestAnimationFrame(loop);
