@@ -2,17 +2,39 @@
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>Tiny 3D Physics - Instanced Color + Spawn</title>
+<title>Tiny 3D Physics - WebGL2 UI</title>
 <style>
-body{margin:0;background:#0b1020;}
+body{margin:0;background:#0b1020;color:#fff;font-family:sans-serif;}
 canvas{display:block;margin:auto;}
+#ui{position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.8);padding:15px;border-radius:8px;border:1px solid #444;}
+.row{margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;}
+label{font-size:12px;margin-right:10px;}
+input[type="number"]{width:50px;background:#222;color:#fff;border:1px solid #555;padding:2px;}
+input[type="range"]{width:100px;}
+button{width:100%;margin-top:10px;padding:5px;cursor:pointer;background:#3498db;color:#fff;border:none;border-radius:4px;}
+button:hover{background:#2980b9;}
 </style>
 </head>
 <body>
+<div id="ui">
+    <div class="row"><label>Bounds X (±):</label><input type="number" id="bx" value="5"></div>
+    <div class="row"><label>Bounds Y (±):</label><input type="number" id="by" value="5"></div>
+    <div class="row"><label>Bounds Z (±):</label><input type="number" id="bz" value="5"></div>
+    <div class="row"><label>Initial Balls:</label><input type="number" id="ballCount" value="20"></div>
+    <div class="row"><label>Camera Dist:</label><input type="range" id="camDist" min="5" max="50" value="15"></div>
+    <button id="resetBtn">Reset Simulation</button>
+</div>
 <canvas id="c"></canvas>
 <script>
 
 const canvas = document.getElementById("c");
+const bxInput = document.getElementById("bx");
+const byInput = document.getElementById("by");
+const bzInput = document.getElementById("bz");
+const bcInput = document.getElementById("ballCount");
+const cdInput = document.getElementById("camDist");
+const resetBtn = document.getElementById("resetBtn");
+
 canvas.width = 1000;
 canvas.height = 700;
 
@@ -122,7 +144,7 @@ gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(sphere.indices),gl.STATIC_
 
 // ================= INSTANCE BUFFER =================
 
-const MAX_BALLS = 500;
+const MAX_BALLS = 1000;
 const STRIDE = 7; // x y z scale r g b
 const instanceData = new Float32Array(MAX_BALLS * STRIDE);
 const instanceBuf = gl.createBuffer();
@@ -180,30 +202,44 @@ function normalize(v){const l=Math.hypot(...v);return[v[0]/l,v[1]/l,v[2]/l];}
 
 class Ball{
     constructor(){
-        this.x=0;
-        this.y=2;
-        this.z=0;
-        this.vx=Math.random()*4-2;
-        this.vy=0;
-        this.vz=Math.random()*4-2;
+        const bx = parseFloat(bxInput.value);
+        const by = parseFloat(byInput.value);
+        const bz = parseFloat(bzInput.value);
         this.r=0.3;
+        this.x=(Math.random()*2-1)*(bx-this.r);
+        this.y=(Math.random()*2-1)*(by-this.r);
+        this.z=(Math.random()*2-1)*(bz-this.r);
+        this.vx=Math.random()*4-2;
+        this.vy=Math.random()*4-2;
+        this.vz=Math.random()*4-2;
         this.invM=1/(this.r*this.r);
         this.color=[Math.random(),Math.random(),Math.random()];
     }
 }
 
-const balls=[];
+let balls=[];
 
 function spawnBall(){
     if(balls.length<MAX_BALLS)
         balls.push(new Ball());
 }
 
-for(let i=0;i<20;i++) spawnBall();
+function init() {
+    balls = [];
+    const count = parseInt(bcInput.value) || 20;
+    for(let i=0; i<count; i++) spawnBall();
+}
+
+init();
+resetBtn.onclick = init;
 
 const gravity=-9;
 
 function step(dt){
+
+    const bx = parseFloat(bxInput.value);
+    const by = parseFloat(byInput.value);
+    const bz = parseFloat(bzInput.value);
 
     for(let a of balls){
         a.vy+=gravity*dt;
@@ -214,10 +250,12 @@ function step(dt){
 
     // box
     for(let a of balls){
-        for(let axis of ["x","y","z"]){
-            if(a[axis]<-5+a.r){ a[axis]=-5+a.r; a["v"+axis]*=-0.8;}
-            if(a[axis]>5-a.r){ a[axis]=5-a.r; a["v"+axis]*=-0.8;}
-        }
+        if(a.x < -bx + a.r){ a.x = -bx + a.r; a.vx *= -0.8; }
+        if(a.x >  bx - a.r){ a.x =  bx - a.r; a.vx *= -0.8; }
+        if(a.y < -by + a.r){ a.y = -by + a.r; a.vy *= -0.8; }
+        if(a.y >  by - a.r){ a.y =  by - a.r; a.vy *= -0.8; }
+        if(a.z < -bz + a.r){ a.z = -bz + a.r; a.vz *= -0.8; }
+        if(a.z >  bz - a.r){ a.z =  bz - a.r; a.vz *= -0.8; }
     }
 
     // ball-ball
@@ -278,8 +316,9 @@ function loop(){
 
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
 
-    const proj=perspective(Math.PI/4,canvas.width/canvas.height,0.1,100);
-    const view=lookAt([8,6,8],[0,0,0],[0,1,0]);
+    const dist = parseFloat(cdInput.value);
+    const proj=perspective(Math.PI/4,canvas.width/canvas.height,0.1,200);
+    const view=lookAt([dist*0.6, dist*0.5, dist*0.6],[0,0,0],[0,1,0]);
 
     gl.uniformMatrix4fv(uProj,false,new Float32Array(proj));
     gl.uniformMatrix4fv(uView,false,new Float32Array(view));
