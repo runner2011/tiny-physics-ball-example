@@ -4,16 +4,38 @@
 <meta charset="utf-8"/>
 <title>Tiny 3D Physics (Canvas)</title>
 <style>
-body{margin:0;background:#0f1425;}
+body{margin:0;background:#0f1425;color:#fff;font-family:sans-serif;}
 canvas{display:block;margin:auto;background:#111;}
+#ui{position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.8);padding:15px;border-radius:8px;border:1px solid #444;}
+.row{margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;}
+label{font-size:12px;margin-right:10px;}
+input[type="number"]{width:50px;background:#222;color:#fff;border:1px solid #555;padding:2px;}
+input[type="range"]{width:100px;}
+button{width:100%;margin-top:10px;padding:5px;cursor:pointer;background:#3498db;color:#fff;border:none;border-radius:4px;}
+button:hover{background:#2980b9;}
 </style>
 </head>
 <body>
+<div id="ui">
+    <div class="row"><label>Bounds X (±):</label><input type="number" id="bx" value="300"></div>
+    <div class="row"><label>Bounds Y (±):</label><input type="number" id="by" value="200"></div>
+    <div class="row"><label>Bounds Z (Max):</label><input type="number" id="bz" value="600"></div>
+    <div class="row"><label>Initial Balls:</label><input type="number" id="ballCount" value="10"></div>
+    <div class="row"><label>Camera Dist:</label><input type="range" id="camDist" min="200" max="2000" value="800"></div>
+    <button id="resetBtn">Reset Simulation</button>
+</div>
 <canvas id="c"></canvas>
 <script>
 
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
+
+const bxInput = document.getElementById("bx");
+const byInput = document.getElementById("by");
+const bzInput = document.getElementById("bz");
+const bcInput = document.getElementById("ballCount");
+const cdInput = document.getElementById("camDist");
+const resetBtn = document.getElementById("resetBtn");
 
 canvas.width = 1000;
 canvas.height = 700;
@@ -43,13 +65,16 @@ class World{
         this.damping = 0.998;
         this.balls = [];
 
-        // 3D box bounds
-        this.minX = -300;
-        this.maxX = 300;
-        this.minY = -200;
-        this.maxY = 200;
+        this.updateBounds();
+    }
+
+    updateBounds(){
+        this.minX = -parseFloat(bxInput.value);
+        this.maxX = parseFloat(bxInput.value);
+        this.minY = -parseFloat(byInput.value);
+        this.maxY = parseFloat(byInput.value);
         this.minZ = 0;
-        this.maxZ = 600;
+        this.maxZ = parseFloat(bzInput.value);
     }
 
     addBall(){
@@ -68,7 +93,7 @@ class World{
     }
 
     step(dt){
-
+        this.updateBounds();
         // integrate
         for(let a of this.balls){
             a.vy += this.gravity * dt;
@@ -171,14 +196,22 @@ class World{
     }
 }
 
-const world = new World();
-for(let i=0;i<10;i++) world.addBall();
+let world = new World();
+
+function init() {
+    world = new World();
+    const count = parseInt(bcInput.value) || 10;
+    for(let i=0; i<count; i++) world.addBall();
+}
+
+init();
+resetBtn.onclick = init;
 
 // simple perspective projection
-const cameraZ = -800;
 const focal = 800;
 
 function project(x,y,z){
+    const cameraZ = -parseFloat(cdInput.value);
     let dz = z - cameraZ;
     let scale = focal / dz;
     return {
