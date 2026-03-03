@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Tiny 3D Physics (Canvas)</title>
+<style>
+body{margin:0;background:#0f1425;}
+canvas{display:block;margin:auto;background:#111;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+canvas.width = 1000;
+canvas.height = 700;
+
+const WIDTH = canvas.width;
+const HEIGHT = canvas.height;
+
+const FIXED_DT = 1/120;
+const SUBSTEPS = 2;
+
+function rand(a,b){ return a + Math.random()*(b-a); }
+
+class Ball{
+    constructor(x,y,z,vx,vy,vz,r){
+        this.x=x; this.y=y; this.z=z;
+        this.vx=vx; this.vy=vy; this.vz=vz;
+        this.r=r;
+        this.invM = 1/(r*r);
+        this.color = `hsl(${rand(0,360)},70%,60%)`;
+    }
+}
+
+class World{
+    constructor(){
+        this.gravity = 900;
+        this.restitution = 0.8;
+        this.damping = 0.998;
+        this.balls = [];
+
+        // 3D box bounds
+        this.minX = -300;
+        this.maxX = 300;
+        this.minY = -200;
+        this.maxY = 200;
+        this.minZ = 0;
+        this.maxZ = 600;
+    }
+
+    addBall(){
+        let r = rand(15,25);
+        this.balls.push(
+            new Ball(
+                rand(this.minX+r,this.maxX-r),
+                rand(this.minY+r,this.maxY-r),
+                rand(this.minZ+r,this.maxZ-r),
+                rand(-100,100),
+                rand(-50,0),
+                rand(-100,100),
+                r
+            )
+        );
+    }
+
+    step(dt){
+
+        // integrate
+        for(let a of this.balls){
+            a.vy += this.gravity * dt;
+
+            a.x += a.vx * dt;
+            a.y += a.vy * dt;
+            a.z += a.vz * dt;
+
+            a.vx *= this.damping;
+            a.vy *= this.damping;
+            a.vz *= this.damping;
+        }
+
+        // box collision (3D AABB)
+        for(let a of this.balls){
+
+            if(a.x - a.r < this.minX){
+                a.x = this.minX + a.r;
+                if(a.vx<0) a.vx = -a.vx * this.restitution;
+            }
+            if(a.x + a.r > this.maxX){
+                a.x = this.maxX - a.r;
+                if(a.vx>0) a.vx = -a.vx * this.restitution;
+            }
+
+            if(a.y - a.r < this.minY){
+                a.y = this.minY + a.r;
+                if(a.vy<0) a.vy = -a.vy * this.restitution;
+            }
+            if(a.y + a.r > this.maxY){
+                a.y = this.maxY - a.r;
+                if(a.vy>0) a.vy = -a.vy * this.restitution;
+            }
+
+            if(a.z - a.r < this.minZ){
+                a.z = this.minZ + a.r;
+                if(a.vz<0) a.vz = -a.vz * this.restitution;
+            }
+            if(a.z + a.r > this.maxZ){
+                a.z = this.maxZ - a.r;
+                if(a.vz>0) a.vz = -a.vz * this.restitution;
+            }
+        }
+
+        // ball-ball collision (3D)
+        for(let i=0;i<this.balls.length;i++){
+            for(let j=i+1;j<this.balls.length;j++){
+
+                let A = this.balls[i];
+                let B = this.balls[j];
+
+                let dx = B.x - A.x;
+                let dy = B.y - A.y;
+                let dz = B.z - A.z;
+
+                let rsum = A.r + B.r;
+                let d2 = dx*dx + dy*dy + dz*dz;
+
+                if(d2 >= rsum*rsum) continue;
+
+                let dist = Math.sqrt(d2) || 0.0001;
+
+                let nx = dx/dist;
+                let ny = dy/dist;
+                let nz = dz/dist;
+
+                // position correction
+                let penetration = rsum - dist;
+                let invSum = A.invM + B.invM;
+                let corr = penetration * 0.8;
+
+                A.x -= nx * corr * (A.invM/invSum);
+                A.y -= ny * corr * (A.invM/invSum);
+                A.z -= nz * corr * (A.invM/invSum);
+
+                B.x += nx * corr * (B.invM/invSum);
+                B.y += ny * corr * (B.invM/invSum);
+                B.z += nz * corr * (B.invM/invSum);
+
+                // impulse
+                let rvx = B.vx - A.vx;
+                let rvy = B.vy - A.vy;
+                let rvz = B.vz - A.vz;
+
+                let relN = rvx*nx + rvy*ny + rvz*nz;
+
+                if(relN < 0){
+                    let jimp = -(1+this.restitution)*relN/(invSum);
+
+                    A.vx -= nx*jimp*A.invM;
+                    A.vy -= ny*jimp*A.invM;
+                    A.vz -= nz*jimp*A.invM;
+
+                    B.vx += nx*jimp*B.invM;
+                    B.vy += ny*jimp*B.invM;
+                    B.vz += nz*jimp*B.invM;
+                }
+            }
+        }
+    }
+}
+
+const world = new World();
+for(let i=0;i<10;i++) world.addBall();
+
+// simple perspective projection
+const cameraZ = -800;
+const focal = 800;
+
+function project(x,y,z){
+    let dz = z - cameraZ;
+    let scale = focal / dz;
+    return {
+        x: WIDTH/2 + x * scale,
+        y: HEIGHT/2 + y * scale,
+        scale: scale
+    };
+}
+
+function draw(){
+
+    ctx.clearRect(0,0,WIDTH,HEIGHT);
+
+    // depth sort (far → near)
+    let sorted = [...world.balls].sort((a,b)=> b.z - a.z);
+
+    for(let a of sorted){
+
+        let p = project(a.x,a.y,a.z);
+        let r = a.r * p.scale;
+
+        ctx.beginPath();
+        ctx.arc(p.x,p.y,r,0,Math.PI*2);
+        ctx.fillStyle = a.color;
+        ctx.fill();
+    }
+}
+
+let acc=0;
+let prev=performance.now();
+
+function loop(now){
+
+    requestAnimationFrame(loop);
+
+    let dt = Math.min(0.05,(now-prev)/1000);
+    prev=now;
+
+    acc += dt;
+
+    while(acc >= FIXED_DT){
+        for(let i=0;i<SUBSTEPS;i++)
+            world.step(FIXED_DT/SUBSTEPS);
+        acc -= FIXED_DT;
+    }
+
+    draw();
+}
+
+requestAnimationFrame(loop);
+
+canvas.addEventListener("click",()=>world.addBall());
+
+</script>
+</body>
+</html>

@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Tiny 3D Physics - Instanced Color + Spawn</title>
+<style>
+body{margin:0;background:#0b1020;}
+canvas{display:block;margin:auto;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+
+const canvas = document.getElementById("c");
+canvas.width = 1000;
+canvas.height = 700;
+
+const gl = canvas.getContext("webgl2");
+if(!gl){ alert("WebGL2 required"); }
+
+gl.enable(gl.DEPTH_TEST);
+gl.clearColor(0.05,0.07,0.12,1);
+
+// ================= SHADERS =================
+
+const vs = `#version 300 es
+precision highp float;
+
+layout(location=0) in vec3 position;
+layout(location=1) in vec3 normal;
+
+layout(location=2) in vec3 instancePos;
+layout(location=3) in float instanceScale;
+layout(location=4) in vec3 instanceColor;
+
+uniform mat4 uProj;
+uniform mat4 uView;
+
+out vec3 vNormal;
+out vec3 vColor;
+
+void main(){
+    vec3 pos = position * instanceScale + instancePos;
+    vNormal = normal;
+    vColor = instanceColor;
+    gl_Position = uProj * uView * vec4(pos,1.0);
+}
+`;
+
+const fs = `#version 300 es
+precision highp float;
+
+in vec3 vNormal;
+in vec3 vColor;
+out vec4 fragColor;
+
+void main(){
+    vec3 lightDir = normalize(vec3(0.5,1.0,0.3));
+    float diff = max(dot(normalize(vNormal),lightDir),0.0);
+    fragColor = vec4(vColor*diff + vColor*0.2,1.0);
+}
+`;
+
+function compile(type,src){
+    const s=gl.createShader(type);
+    gl.shaderSource(s,src);
+    gl.compileShader(s);
+    return s;
+}
+
+const prog=gl.createProgram();
+gl.attachShader(prog,compile(gl.VERTEX_SHADER,vs));
+gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,fs));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+// ================= SPHERE =================
+
+function createSphere(latBands,longBands){
+    const positions=[],normals=[],indices=[];
+    for(let lat=0;lat<=latBands;lat++){
+        const t=lat*Math.PI/latBands;
+        const st=Math.sin(t), ct=Math.cos(t);
+        for(let lon=0;lon<=longBands;lon++){
+            const p=lon*2*Math.PI/longBands;
+            const sp=Math.sin(p), cp=Math.cos(p);
+            const x=cp*st, y=ct, z=sp*st;
+            positions.push(x,y,z);
+            normals.push(x,y,z);
+        }
+    }
+    for(let lat=0;lat<latBands;lat++){
+        for(let lon=0;lon<longBands;lon++){
+            const a=lat*(longBands+1)+lon;
+            const b=a+longBands+1;
+            indices.push(a,b,a+1,b,b+1,a+1);
+        }
+    }
+    return {positions,normals,indices};
+}
+
+const sphere=createSphere(20,20);
+
+const vao=gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+function createBuffer(data,loc,size){
+    const b=gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER,b);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(data),gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc,size,gl.FLOAT,false,0,0);
+}
+
+createBuffer(sphere.positions,0,3);
+createBuffer(sphere.normals,1,3);
+
+const indexBuf=gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,indexBuf);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(sphere.indices),gl.STATIC_DRAW);
+
+// ================= INSTANCE BUFFER =================
+
+const MAX_BALLS = 500;
+const STRIDE = 7; // x y z scale r g b
+const instanceData = new Float32Array(MAX_BALLS * STRIDE);
+const instanceBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,instanceBuf);
+gl.bufferData(gl.ARRAY_BUFFER,instanceData,gl.DYNAMIC_DRAW);
+
+// position
+gl.enableVertexAttribArray(2);
+gl.vertexAttribPointer(2,3,gl.FLOAT,false,STRIDE*4,0);
+gl.vertexAttribDivisor(2,1);
+
+// scale
+gl.enableVertexAttribArray(3);
+gl.vertexAttribPointer(3,1,gl.FLOAT,false,STRIDE*4,3*4);
+gl.vertexAttribDivisor(3,1);
+
+// color
+gl.enableVertexAttribArray(4);
+gl.vertexAttribPointer(4,3,gl.FLOAT,false,STRIDE*4,4*4);
+gl.vertexAttribDivisor(4,1);
+
+// ================= MATRIX =================
+
+function perspective(fov,aspect,near,far){
+    const f=1/Math.tan(fov/2);
+    return [
+        f/aspect,0,0,0,
+        0,f,0,0,
+        0,0,(far+near)/(near-far),-1,
+        0,0,(2*far*near)/(near-far),0
+    ];
+}
+
+function lookAt(e,t,u){
+    const z=normalize(sub(e,t));
+    const x=normalize(cross(u,z));
+    const y=cross(z,x);
+    return [
+        x[0],y[0],z[0],0,
+        x[1],y[1],z[1],0,
+        x[2],y[2],z[2],0,
+        -dot(x,e),-dot(y,e),-dot(z,e),1
+    ];
+}
+
+function sub(a,b){return[a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function cross(a,b){return[
+a[1]*b[2]-a[2]*b[1],
+a[2]*b[0]-a[0]*b[2],
+a[0]*b[1]-a[1]*b[0]];}
+function normalize(v){const l=Math.hypot(...v);return[v[0]/l,v[1]/l,v[2]/l];}
+
+// ================= PHYSICS =================
+
+class Ball{
+    constructor(){
+        this.x=0;
+        this.y=2;
+        this.z=0;
+        this.vx=Math.random()*4-2;
+        this.vy=0;
+        this.vz=Math.random()*4-2;
+        this.r=0.3;
+        this.invM=1/(this.r*this.r);
+        this.color=[Math.random(),Math.random(),Math.random()];
+    }
+}
+
+const balls=[];
+
+function spawnBall(){
+    if(balls.length<MAX_BALLS)
+        balls.push(new Ball());
+}
+
+for(let i=0;i<20;i++) spawnBall();
+
+const gravity=-9;
+
+function step(dt){
+
+    for(let a of balls){
+        a.vy+=gravity*dt;
+        a.x+=a.vx*dt;
+        a.y+=a.vy*dt;
+        a.z+=a.vz*dt;
+    }
+
+    // box
+    for(let a of balls){
+        for(let axis of ["x","y","z"]){
+            if(a[axis]<-5+a.r){ a[axis]=-5+a.r; a["v"+axis]*=-0.8;}
+            if(a[axis]>5-a.r){ a[axis]=5-a.r; a["v"+axis]*=-0.8;}
+        }
+    }
+
+    // ball-ball
+    for(let i=0;i<balls.length;i++){
+        for(let j=i+1;j<balls.length;j++){
+
+            const A=balls[i], B=balls[j];
+            let dx=B.x-A.x, dy=B.y-A.y, dz=B.z-A.z;
+            let rsum=A.r+B.r;
+            let d2=dx*dx+dy*dy+dz*dz;
+            if(d2>=rsum*rsum) continue;
+
+            let dist=Math.sqrt(d2)||0.0001;
+            let nx=dx/dist, ny=dy/dist, nz=dz/dist;
+
+            let penetration=rsum-dist;
+            let invSum=A.invM+B.invM;
+            let corr=penetration*0.8;
+
+            A.x-=nx*corr*(A.invM/invSum);
+            A.y-=ny*corr*(A.invM/invSum);
+            A.z-=nz*corr*(A.invM/invSum);
+
+            B.x+=nx*corr*(B.invM/invSum);
+            B.y+=ny*corr*(B.invM/invSum);
+            B.z+=nz*corr*(B.invM/invSum);
+
+            let rvx=B.vx-A.vx;
+            let rvy=B.vy-A.vy;
+            let rvz=B.vz-A.vz;
+
+            let relN=rvx*nx+rvy*ny+rvz*nz;
+
+            if(relN<0){
+                let jimp=-(1+0.8)*relN/(invSum);
+                A.vx-=nx*jimp*A.invM;
+                A.vy-=ny*jimp*A.invM;
+                A.vz-=nz*jimp*A.invM;
+                B.vx+=nx*jimp*B.invM;
+                B.vy+=ny*jimp*B.invM;
+                B.vz+=nz*jimp*B.invM;
+            }
+        }
+    }
+}
+
+// click spawn
+canvas.addEventListener("click",spawnBall);
+
+// ================= LOOP =================
+
+const uProj=gl.getUniformLocation(prog,"uProj");
+const uView=gl.getUniformLocation(prog,"uView");
+
+function loop(){
+
+    step(0.016);
+
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+
+    const proj=perspective(Math.PI/4,canvas.width/canvas.height,0.1,100);
+    const view=lookAt([8,6,8],[0,0,0],[0,1,0]);
+
+    gl.uniformMatrix4fv(uProj,false,new Float32Array(proj));
+    gl.uniformMatrix4fv(uView,false,new Float32Array(view));
+
+    for(let i=0;i<balls.length;i++){
+        instanceData[i*STRIDE+0]=balls[i].x;
+        instanceData[i*STRIDE+1]=balls[i].y;
+        instanceData[i*STRIDE+2]=balls[i].z;
+        instanceData[i*STRIDE+3]=balls[i].r;
+        instanceData[i*STRIDE+4]=balls[i].color[0];
+        instanceData[i*STRIDE+5]=balls[i].color[1];
+        instanceData[i*STRIDE+6]=balls[i].color[2];
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER,instanceBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER,0,instanceData);
+
+    gl.bindVertexArray(vao);
+
+    gl.drawElementsInstanced(
+        gl.TRIANGLES,
+        sphere.indices.length,
+        gl.UNSIGNED_SHORT,
+        0,
+        balls.length
+    );
+
+    requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
