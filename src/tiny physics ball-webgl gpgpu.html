@@ -363,7 +363,7 @@ function loop(now){
 
     const dist = parseFloat(document.getElementById("camDist").value);
     gl.uniformMatrix4fv(uProj, false, new Float32Array(perspective(Math.PI/4, canvas.width/canvas.height, 0.1, 200)));
-    gl.uniformMatrix4fv(uView, false, new Float32Array(lookAt([dist*0.6, dist*0.5, dist*0.6], [0,0,0], [0,1,0])));
+    gl.uniformMatrix4fv(gl.getUniformLocation(progRender, "uView"), false, new Float32Array(lookAt([0, dist * 0.3, dist], [0,0,0], [0,1,0])));
 
     // 绑定刚刚算好的新位置纹理去渲染
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, state[writeIdx].pos);

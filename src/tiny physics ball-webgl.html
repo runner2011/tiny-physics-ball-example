@@ -342,7 +342,7 @@ function loop(now){
 
     const dist = parseFloat(cdInput.value);
     const proj=perspective(Math.PI/4,canvas.width/canvas.height,0.1,200);
-    const view=lookAt([dist*0.6, dist*0.5, dist*0.6],[0,0,0],[0,1,0]);
+    const view=lookAt([0, dist * 0.3, dist],[0,0,0],[0,1,0]);
 
     gl.uniformMatrix4fv(uProj,false,new Float32Array(proj));
     gl.uniformMatrix4fv(uView,false,new Float32Array(view));
