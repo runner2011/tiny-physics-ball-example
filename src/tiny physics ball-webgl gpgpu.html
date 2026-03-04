@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Tiny 3D Physics - WebGL2 GPGPU</title>
+<style>
+body{margin:0;background:#0b1020;color:#fff;font-family:sans-serif;}
+canvas{display:block;margin:auto;}
+#ui{position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.8);padding:15px;border-radius:8px;border:1px solid #444;}
+.row{margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;}
+label{font-size:12px;margin-right:10px;}
+input[type="number"]{width:60px;background:#222;color:#fff;border:1px solid #555;padding:2px;}
+input[type="range"]{width:100px;}
+button{width:100%;margin-top:10px;padding:5px;cursor:pointer;background:#e74c3c;color:#fff;border:none;border-radius:4px;font-weight:bold;}
+button:hover{background:#c0392b;}
+.note {font-size: 10px; color: #aaa; margin-top: 10px; text-align: center;}
+</style>
+</head>
+<body>
+<div id="ui">
+    <div class="row"><label>Bounds X (±):</label><input type="number" id="bx" value="5"></div>
+    <div class="row"><label>Bounds Y (±):</label><input type="number" id="by" value="5"></div>
+    <div class="row"><label>Bounds Z (±):</label><input type="number" id="bz" value="5"></div>
+    <div class="row"><label>Active Balls:</label><input type="number" id="ballCount" value="5000"></div>
+    <div class="row"><label>Max Texture:</label><input type="number" id="maxBallsInput" value="8192" disabled></div>
+    <div class="row"><label>Camera Dist:</label><input type="range" id="camDist" min="5" max="50" value="15"></div>
+    <div class="row"><label>FPS:</label><strong id="fpsDisplay" style="color:#2ecc71;font-size:16px;">0</strong></div>
+    <button id="resetBtn">Reset Physics (GPU)</button>
+    <div class="note">Click canvas to add balls</div>
+</div>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById("c");
+canvas.width = 1000;
+canvas.height = 700;
+
+const gl = canvas.getContext("webgl2", { antialias: false });
+if(!gl) alert("WebGL2 required");
+
+// 必须开启浮点颜色缓冲扩展，否则无法将物理数据写入纹理
+if (!gl.getExtension("EXT_color_buffer_float")) {
+    alert("EXT_color_buffer_float not supported! GPGPU cannot run.");
+}
+
+gl.enable(gl.DEPTH_TEST);
+gl.clearColor(0.05, 0.07, 0.12, 1);
+
+// ================= SHADERS =================
+
+function compile(type, src){
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(s));
+    }
+    return s;
+}
+
+function createProgram(vsSrc, fsSrc) {
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(prog);
+    return prog;
+}
+
+// --- 1. 物理计算 Shader (GPGPU) ---
+// 利用 gl_VertexID 凭空画一个全屏矩形，不需要外部传顶点
+const physicsVS = `#version 300 es
+const vec2[] quad = vec2[]( vec2(-1,-1), vec2(1,-1), vec2(-1,1), vec2(-1,1), vec2(1,-1), vec2(1,1) );
+void main() { 
+    gl_Position = vec4(quad[gl_VertexID], 0.0, 1.0); 
+}`;
+
+const physicsFS = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+uniform sampler2D u_posTex;
+uniform sampler2D u_velTex;
+uniform vec3 u_bounds;
+uniform int u_activeBalls;
+
+// 多重渲染目标 (MRT)：同时输出新的位置和速度
+layout(location = 0) out vec4 outPos;
+layout(location = 1) out vec4 outVel;
+
+void main(){
+    int id = int(gl_FragCoord.x);
+    
+    // 取出当前球的数据
+    vec4 myPos = texelFetch(u_posTex, ivec2(id, 0), 0);
+    vec4 myVel = texelFetch(u_velTex, ivec2(id, 0), 0);
+
+    // 如果超出了当前激活的球数量，保持休眠状态不动
+    if (id >= u_activeBalls) {
+        outPos = myPos;
+        outVel = vec4(0.0);
+        return;
+    }
+
+    vec3 pos = myPos.xyz;
+    float r = myPos.w;
+    vec3 vel = myVel.xyz;
+    float invM = myVel.w;
+
+    float dt = 0.016;
+    vel.y += -9.0 * dt; // 重力
+    pos += vel * dt;
+
+    // 边界碰撞
+    if(pos.x < -u_bounds.x + r){ pos.x = -u_bounds.x + r; vel.x *= -0.8; }
+    if(pos.x >  u_bounds.x - r){ pos.x =  u_bounds.x - r; vel.x *= -0.8; }
+    if(pos.y < -u_bounds.y + r){ pos.y = -u_bounds.y + r; vel.y *= -0.8; }
+    if(pos.y >  u_bounds.y - r){ pos.y =  u_bounds.y - r; vel.y *= -0.8; }
+    if(pos.z < -u_bounds.z + r){ pos.z = -u_bounds.z + r; vel.z *= -0.8; }
+    if(pos.z >  u_bounds.z - r){ pos.z =  u_bounds.z - r; vel.z *= -0.8; }
+
+    // 球体碰撞 (GPU 暴力 O(N^2))
+    for(int i = 0; i < u_activeBalls; i++){
+        if(i == id) continue; // 不和自己撞
+        
+        vec4 otherPos = texelFetch(u_posTex, ivec2(i, 0), 0);
+        vec4 otherVel = texelFetch(u_velTex, ivec2(i, 0), 0);
+
+        vec3 dx = otherPos.xyz - pos;
+        float rsum = r + otherPos.w;
+        float d2 = dot(dx, dx);
+
+        if(d2 > 0.0001 && d2 < rsum * rsum){
+            float dist = sqrt(d2);
+            vec3 nx = dx / dist;
+
+            float penetration = rsum - dist;
+            float invSum = invM + otherVel.w;
+            float corr = penetration * 0.8;
+
+            pos -= nx * corr * (invM / invSum);
+
+            vec3 rvx = otherVel.xyz - vel;
+            float relN = dot(rvx, nx);
+            if(relN < 0.0){
+                float jimp = -(1.8) * relN / invSum;
+                vel -= nx * jimp * invM;
+            }
+        }
+    }
+
+    outPos = vec4(pos, r);
+    outVel = vec4(vel, invM);
+}`;
+
+// --- 2. 渲染 Shader ---
+const renderVS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 position;
+layout(location=1) in vec3 normal;
+
+uniform sampler2D u_posTex;
+uniform mat4 uProj;
+uniform mat4 uView;
+
+out vec3 vNormal;
+out vec3 vColor;
+
+// 在 GPU 端根据 InstanceID 算一个随机颜色，省去传颜色的开销
+vec3 hashColor(int id) {
+    float f = float(id);
+    return fract(sin(vec3(f*12.9898, f*78.233, f*37.719)) * 43758.5453);
+}
+
+void main(){
+    vec4 pData = texelFetch(u_posTex, ivec2(gl_InstanceID, 0), 0);
+    vec3 pos = pData.xyz;
+    float r = pData.w;
+
+    vNormal = normal;
+    vColor = hashColor(gl_InstanceID);
+    
+    vec3 worldPos = position * r + pos;
+    gl_Position = uProj * uView * vec4(worldPos, 1.0);
+}`;
+
+const renderFS = `#version 300 es
+precision highp float;
+in vec3 vNormal;
+in vec3 vColor;
+out vec4 fragColor;
+void main(){
+    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+    float diff = max(dot(normalize(vNormal), lightDir), 0.0);
+    fragColor = vec4(vColor * diff + vColor * 0.2, 1.0);
+}`;
+
+const progPhysics = createProgram(physicsVS, physicsFS);
+const progRender = createProgram(renderVS, renderFS);
+
+// ================= SPHERE GEOMETRY =================
+function createSphere(latBands, longBands){
+    const positions=[], normals=[], indices=[];
+    for(let lat=0; lat<=latBands; lat++){
+        const t = lat*Math.PI/latBands;
+        for(let lon=0; lon<=longBands; lon++){
+            const p = lon*2*Math.PI/longBands;
+            const x = Math.cos(p)*Math.sin(t), y = Math.cos(t), z = Math.sin(p)*Math.sin(t);
+            positions.push(x,y,z); normals.push(x,y,z);
+        }
+    }
+    for(let lat=0; lat<latBands; lat++){
+        for(let lon=0; lon<longBands; lon++){
+            const a = lat*(longBands+1)+lon, b = a+longBands+1;
+            indices.push(a,b,a+1, b,b+1,a+1);
+        }
+    }
+    return {positions, normals, indices};
+}
+
+const sphere = createSphere(16, 16);
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+function createBuffer(data, loc){
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+}
+createBuffer(sphere.positions, 0);
+createBuffer(sphere.normals, 1);
+const indexBuf = gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuf);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(sphere.indices), gl.STATIC_DRAW);
+
+// ================= GPGPU SETUP (PING PONG) =================
+
+const MAX_TEXTURE_SIZE = 8192; // 支持最多渲染 8192 个球
+let activeBalls = parseInt(document.getElementById("ballCount").value);
+
+function createDataTexture(data) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // 写入浮点数据 RGBA32F
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, MAX_TEXTURE_SIZE, 1, 0, gl.RGBA, gl.FLOAT, data);
+    return tex;
+}
+
+let state = [];
+
+function initPhysics() {
+    activeBalls = parseInt(document.getElementById("ballCount").value);
+    const bx = parseFloat(document.getElementById("bx").value);
+    const by = parseFloat(document.getElementById("by").value);
+    const bz = parseFloat(document.getElementById("bz").value);
+    
+    const posData = new Float32Array(MAX_TEXTURE_SIZE * 4);
+    const velData = new Float32Array(MAX_TEXTURE_SIZE * 4);
+
+    for(let i=0; i<MAX_TEXTURE_SIZE; i++){
+        let r = 0.3;
+        posData[i*4 + 0] = (Math.random()*2-1)*(bx-r);
+        posData[i*4 + 1] = (Math.random()*2-1)*(by-r);
+        posData[i*4 + 2] = (Math.random()*2-1)*(bz-r);
+        posData[i*4 + 3] = r; // W通道存半径
+
+        velData[i*4 + 0] = Math.random()*4-2;
+        velData[i*4 + 1] = Math.random()*4-2;
+        velData[i*4 + 2] = Math.random()*4-2;
+        velData[i*4 + 3] = 1 / (r*r); // W通道存反质量
+    }
+
+    state = [
+        { pos: createDataTexture(posData), vel: createDataTexture(velData), fbo: gl.createFramebuffer() },
+        { pos: createDataTexture(null),    vel: createDataTexture(null),    fbo: gl.createFramebuffer() }
+    ];
+
+    // 配置 FBO
+    for(let i=0; i<2; i++) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, state[i].fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, state[i].pos, 0);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, state[i].vel, 0);
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+document.getElementById("resetBtn").onclick = initPhysics;
+canvas.addEventListener("click", () => {
+    activeBalls = Math.min(activeBalls + 50, MAX_TEXTURE_SIZE);
+    document.getElementById("ballCount").value = activeBalls;
+});
+
+initPhysics();
+
+// ================= MATH MATRIX =================
+function perspective(fov,aspect,near,far){
+    const f=1/Math.tan(fov/2);
+    return [f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)/(near-far),-1, 0,0,(2*far*near)/(near-far),0];
+}
+function lookAt(e,t,u){
+    const z=normalize(sub(e,t)), x=normalize(cross(u,z)), y=cross(z,x);
+    return [x[0],y[0],z[0],0, x[1],y[1],z[1],0, x[2],y[2],z[2],0, -dot(x,e),-dot(y,e),-dot(z,e),1];
+}
+function sub(a,b){return[a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function cross(a,b){return[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];}
+function normalize(v){const l=Math.hypot(...v);return[v[0]/l,v[1]/l,v[2]/l];}
+
+// ================= MAIN LOOP =================
+
+let readIdx = 0, frameCount = 0, lastFpsUpdate = 0;
+
+const uPhysPos = gl.getUniformLocation(progPhysics, "u_posTex");
+const uPhysVel = gl.getUniformLocation(progPhysics, "u_velTex");
+const uBounds = gl.getUniformLocation(progPhysics, "u_bounds");
+const uActiveBallsPhys = gl.getUniformLocation(progPhysics, "u_activeBalls");
+
+const uProj = gl.getUniformLocation(progRender, "uProj");
+const uView = gl.getUniformLocation(progRender, "uView");
+const uRenderPos = gl.getUniformLocation(progRender, "u_posTex");
+
+function loop(now){
+    // FPS 计算
+    frameCount++;
+    if (now - lastFpsUpdate >= 1000) {
+        document.getElementById("fpsDisplay").innerText = frameCount;
+        frameCount = 0;
+        lastFpsUpdate = now;
+    }
+
+    let writeIdx = 1 - readIdx;
+    
+    // ----------------- PASS 1: GPU 物理计算 -----------------
+    gl.useProgram(progPhysics);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, state[writeIdx].fbo);
+    gl.viewport(0, 0, MAX_TEXTURE_SIZE, 1); // 视口宽度等于小球总数
+
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, state[readIdx].pos);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, state[readIdx].vel);
+    
+    gl.uniform1i(uPhysPos, 0);
+    gl.uniform1i(uPhysVel, 1);
+    gl.uniform3f(uBounds, 
+        parseFloat(document.getElementById("bx").value),
+        parseFloat(document.getElementById("by").value),
+        parseFloat(document.getElementById("bz").value)
+    );
+    gl.uniform1i(uActiveBallsPhys, activeBalls);
+
+    // 画一个全屏 Quad 触发运算
+    gl.drawArrays(gl.TRIANGLES, 0, 6); 
+
+    // ----------------- PASS 2: 屏幕渲染 -----------------
+    gl.useProgram(progRender);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    const dist = parseFloat(document.getElementById("camDist").value);
+    gl.uniformMatrix4fv(uProj, false, new Float32Array(perspective(Math.PI/4, canvas.width/canvas.height, 0.1, 200)));
+    gl.uniformMatrix4fv(uView, false, new Float32Array(lookAt([dist*0.6, dist*0.5, dist*0.6], [0,0,0], [0,1,0])));
+
+    // 绑定刚刚算好的新位置纹理去渲染
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, state[writeIdx].pos);
+    gl.uniform1i(uRenderPos, 0);
+
+    gl.bindVertexArray(vao);
+    gl.drawElementsInstanced(gl.TRIANGLES, sphere.indices.length, gl.UNSIGNED_SHORT, 0, activeBalls);
+
+    // 交换读写索引
+    readIdx = writeIdx;
+
+    requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
