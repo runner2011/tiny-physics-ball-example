@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tiny 3D Physics - WebGL2 GPGPU (Simple)</title>
+    <style>
+        body { margin: 0; background: #0b1020; color: #fff; font-family: sans-serif; overflow: hidden; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        #ui { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; border: 1px solid #444; pointer-events: auto; }
+        .row { margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
+        label { font-size: 12px; margin-right: 10px; }
+        input[type="number"] { width: 60px; background: #222; color: #fff; border: 1px solid #555; padding: 2px; }
+        input[type="range"] { width: 100px; }
+        button { width: 100%; margin-top: 10px; padding: 8px; cursor: pointer; background: #3498db; color: #fff; border: none; border-radius: 4px; font-weight: bold; }
+        button:hover { background: #2980b9; }
+        .stats { font-size: 14px; color: #2ecc71; margin-top: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="row"><label>Bounds X/Y/Z:</label>
+            <input type="number" id="bx" value="5" step="0.5">
+            <input type="number" id="by" value="5" step="0.5">
+            <input type="number" id="bz" value="5" step="0.5">
+        </div>
+        <div class="row"><label>Ball Count:</label><input type="number" id="ballCount" value="1024" step="128"></div>
+        <div class="row"><label>Camera Dist:</label><input type="range" id="camDist" min="5" max="50" value="15"></div>
+        <div class="stats">FPS: <span id="fpsDisplay">0</span></div>
+        <div class="stats">Balls: <span id="actualBalls">0</span></div>
+        <button id="resetBtn">Reset Simulation</button>
+        <p style="font-size: 10px; color: #aaa; margin-top: 10px;">GPGPU Scheme 1: Brute Force O(N²)</p>
+    </div>
+    <canvas id="c"></canvas>
+
+    <script>
+        const canvas = document.getElementById("c");
+        const gl = canvas.getContext("webgl2", { antialias: true });
+        if (!gl) { alert("WebGL2 required"); }
+
+        if (!gl.getExtension("EXT_color_buffer_float")) {
+            alert("EXT_color_buffer_float not supported! GPGPU physics requires floating point textures.");
+        }
+
+        gl.enable(gl.DEPTH_TEST);
+        gl.clearColor(0.1, 0.12, 0.15, 1.0);
+
+        // ================= SHADERS =================
+
+        const physicsVS = `#version 300 es
+        void main() {
+            vec2 quad[6] = vec2[](
+                vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+                vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0)
+            );
+            gl_Position = vec4(quad[gl_VertexID], 0.0, 1.0);
+        }`;
+
+        const physicsFS = `#version 300 es
+        precision highp float;
+        precision highp sampler2D;
+
+        uniform sampler2D uPosTex;
+        uniform sampler2D uVelTex;
+        uniform vec3 uBounds;
+        uniform int uCount;
+        uniform float uDt;
+
+        layout(location = 0) out vec4 outPos;
+        layout(location = 1) out vec4 outVel;
+
+        void main() {
+            int id = int(gl_FragCoord.x);
+            if (id >= uCount) {
+                outPos = vec4(0.0);
+                outVel = vec4(0.0);
+                return;
+            }
+
+            vec4 pData = texelFetch(uPosTex, ivec2(id, 0), 0);
+            vec4 vData = texelFetch(uVelTex, ivec2(id, 0), 0);
+
+            vec3 pos = pData.xyz;
+            float radius = pData.w;
+            vec3 vel = vData.xyz;
+            float invMass = vData.w;
+
+            // Gravity
+            vel.y += -9.8 * uDt;
+            pos += vel * uDt;
+
+            // Box collision
+            vec3 low = -uBounds + radius;
+            vec3 high = uBounds - radius;
+
+            if (pos.x < low.x) { pos.x = low.x; vel.x = abs(vel.x) * 0.8; }
+            if (pos.x > high.x) { pos.x = high.x; vel.x = -abs(vel.x) * 0.8; }
+            if (pos.y < low.y) { pos.y = low.y; vel.y = abs(vel.y) * 0.8; }
+            if (pos.y > high.y) { pos.y = high.y; vel.y = -abs(vel.y) * 0.8; }
+            if (pos.z < low.z) { pos.z = low.z; vel.z = abs(vel.z) * 0.8; }
+            if (pos.z > high.z) { pos.z = high.z; vel.z = -abs(vel.z) * 0.8; }
+
+            // Ball-Ball collision (Brute Force O(N^2))
+            for (int i = 0; i < uCount; i++) {
+                if (i == id) continue;
+                vec4 pOther = texelFetch(uPosTex, ivec2(i, 0), 0);
+                vec3 delta = pos - pOther.xyz;
+                float distSq = dot(delta, delta);
+                float minFill = radius + pOther.w;
+                
+                if (distSq < minFill * minFill && distSq > 0.0001) {
+                    float dist = sqrt(distSq);
+                    vec3 normal = delta / dist;
+                    float overlap = minFill - dist;
+                    
+                    vec4 vOther = texelFetch(uVelTex, ivec2(i, 0), 0);
+                    float totalInvMass = invMass + vOther.w;
+                    
+                    // Position correction
+                    pos += normal * overlap * (invMass / totalInvMass);
+                    
+                    // Velocity impulse
+                    vec3 relVel = vel - vOther.xyz;
+                    float sepVel = dot(relVel, normal);
+                    if (sepVel < 0.0) {
+                        float impulse = -(1.5 * sepVel) / totalInvMass;
+                        vel += normal * impulse * invMass;
+                    }
+                }
+            }
+
+            outPos = vec4(pos, radius);
+            outVel = vec4(vel, invMass);
+        }`;
+
+        const renderVS = `#version 300 es
+        layout(location = 0) in vec3 aPos;
+        layout(location = 1) in vec3 aNormal;
+
+        uniform sampler2D uPosTex;
+        uniform mat4 uProj;
+        uniform mat4 uView;
+
+        out vec3 vNormal;
+        out vec3 vColor;
+
+        vec3 getHashColor(int id) {
+            float f = float(id);
+            return fract(sin(vec3(f * 12.9898, f * 78.233, f * 37.719)) * 43758.5453);
+        }
+
+        void main() {
+            vec4 pData = texelFetch(uPosTex, ivec2(gl_InstanceID, 0), 0);
+            vec3 worldPos = aPos * pData.w + pData.xyz;
+            vNormal = aNormal;
+            vColor = getHashColor(gl_InstanceID);
+            gl_Position = uProj * uView * vec4(worldPos, 1.0);
+        }`;
+
+        const renderFS = `#version 300 es
+        precision highp float;
+        in vec3 vNormal;
+        in vec3 vColor;
+        out vec4 fragColor;
+        void main() {
+            vec3 N = normalize(vNormal);
+            vec3 L = normalize(vec3(0.5, 1.0, 0.7)); // Light direction towards the camera
+            float diff = max(dot(N, L), 0.0);
+            float ambient = 0.3;
+            fragColor = vec4(vColor * (diff + ambient), 1.0);
+        }`;
+
+        function createShader(type, src) {
+            const s = gl.createShader(type);
+            gl.shaderSource(s, src);
+            gl.compileShader(s);
+            if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+            return s;
+        }
+
+        function createProgram(vs, fs) {
+            const p = gl.createProgram();
+            gl.attachShader(p, createShader(gl.VERTEX_SHADER, vs));
+            gl.attachShader(p, createShader(gl.FRAGMENT_SHADER, fs));
+            gl.linkProgram(p);
+            return p;
+        }
+
+        const progPhys = createProgram(physicsVS, physicsFS);
+        const progRender = createProgram(renderVS, renderFS);
+
+        // ================= GEOMETRY =================
+
+        function createSphere(res) {
+            const pos = [], norm = [], idx = [];
+            for (let i = 0; i <= res; i++) {
+                let lat = i * Math.PI / res;
+                for (let j = 0; j <= res; j++) {
+                    let lon = j * 2 * Math.PI / res;
+                    let x = Math.cos(lon) * Math.sin(lat), y = Math.cos(lat), z = Math.sin(lon) * Math.sin(lat);
+                    pos.push(x, y, z); norm.push(x, y, z);
+                }
+            }
+            for (let i = 0; i < res; i++) {
+                for (let j = 0; j < res; j++) {
+                    let a = i * (res + 1) + j, b = a + res + 1;
+                    idx.push(a, b, a + 1, b, b + 1, a + 1);
+                }
+            }
+            return { pos, norm, idx };
+        }
+
+        const sphere = createSphere(16);
+        const vao = gl.createVertexArray();
+        gl.bindVertexArray(vao);
+        
+        const bPos = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, bPos);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphere.pos), gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+        const bNorm = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, bNorm);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphere.norm), gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+
+        const bIdx = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bIdx);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(sphere.idx), gl.STATIC_DRAW);
+
+        // ================= GPGPU STATE =================
+
+        let maxBalls = 8192;
+        let currentCount = 0;
+
+        function createDataTexture(data) {
+            const t = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, t);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, maxBalls, 1, 0, gl.RGBA, gl.FLOAT, data);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            return t;
+        }
+
+        let textures = [];
+        let fbos = [];
+        let readIdx = 0;
+
+        function initSimulation() {
+            currentCount = parseInt(document.getElementById("ballCount").value);
+            const bx = parseFloat(document.getElementById("bx").value);
+            const by = parseFloat(document.getElementById("by").value);
+            const bz = parseFloat(document.getElementById("bz").value);
+            
+            const posData = new Float32Array(maxBalls * 4);
+            const velData = new Float32Array(maxBalls * 4);
+
+            for (let i = 0; i < currentCount; i++) {
+                let r = 0.15 + Math.random() * 0.15;
+                posData[i * 4 + 0] = (Math.random() * 2 - 1) * (bx - r);
+                posData[i * 4 + 1] = (Math.random() * 2 - 1) * (by - r);
+                posData[i * 4 + 2] = (Math.random() * 2 - 1) * (bz - r);
+                posData[i * 4 + 3] = r;
+
+                velData[i * 4 + 0] = (Math.random() * 2 - 1) * 3;
+                velData[i * 4 + 1] = (Math.random() * 2 - 1) * 3;
+                velData[i * 4 + 2] = (Math.random() * 2 - 1) * 3;
+                velData[i * 4 + 3] = 1.0 / (r * r * r); 
+            }
+
+            if (textures.length) textures.forEach(t => gl.deleteTexture(t));
+            if (fbos.length) fbos.forEach(f => gl.deleteFramebuffer(f));
+
+            textures = [
+                createDataTexture(posData), createDataTexture(velData), // Set 0
+                createDataTexture(null), createDataTexture(null)       // Set 1
+            ];
+
+            fbos = [gl.createFramebuffer(), gl.createFramebuffer()];
+            
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbos[0]);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures[2], 0);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, textures[3], 0);
+            gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbos[1]);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures[0], 0);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, textures[1], 0);
+            gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            document.getElementById("actualBalls").innerText = currentCount;
+        }
+
+        document.getElementById("resetBtn").onclick = initSimulation;
+        initSimulation();
+
+        // ================= MATH =================
+
+        function perspective(fov, aspect, near, far) {
+            const f = 1.0 / Math.tan(fov / 2);
+            return [f/aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far+near)/(near-far), -1, 0, 0, (2*far*near)/(near-far), 0];
+        }
+
+        function lookAt(eye, target, up) {
+            const z = normalize([eye[0]-target[0], eye[1]-target[1], eye[2]-target[2]]);
+            const x = normalize(cross(up, z));
+            const y = cross(z, x);
+            return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
+        }
+
+        function normalize(v) { let l = Math.hypot(...v); return [v[0]/l, v[1]/l, v[2]/l]; }
+        function cross(a, b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+        function dot(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+
+        // ================= LOOP =================
+
+        let frameCount = 0, lastTime = 0;
+        function loop(now) {
+            if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            }
+
+            const dt = 0.016; 
+            const writeIdx = 1 - readIdx;
+
+            gl.useProgram(progPhys);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbos[readIdx]);
+            gl.viewport(0, 0, maxBalls, 1);
+            
+            gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, textures[readIdx * 2 + 0]);
+            gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, textures[readIdx * 2 + 1]);
+            gl.uniform1i(gl.getUniformLocation(progPhys, "uPosTex"), 0);
+            gl.uniform1i(gl.getUniformLocation(progPhys, "uVelTex"), 1);
+            gl.uniform3f(gl.getUniformLocation(progPhys, "uBounds"), 
+                parseFloat(document.getElementById("bx").value),
+                parseFloat(document.getElementById("by").value),
+                parseFloat(document.getElementById("bz").value));
+            gl.uniform1i(gl.getUniformLocation(progPhys, "uCount"), currentCount);
+            gl.uniform1f(gl.getUniformLocation(progPhys, "uDt"), dt);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            gl.useProgram(progRender);
+            const dist = parseFloat(document.getElementById("camDist").value);
+            const proj = perspective(Math.PI/4, canvas.width/canvas.height, 0.1, 200);
+            const view = lookAt([dist, dist*0.8, dist], [0,0,0], [0,1,0]);
+            gl.uniformMatrix4fv(gl.getUniformLocation(progRender, "uProj"), false, new Float32Array(proj));
+            gl.uniformMatrix4fv(gl.getUniformLocation(progRender, "uView"), false, new Float32Array(view));
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[writeIdx * 2 + 0]); 
+            gl.uniform1i(gl.getUniformLocation(progRender, "uPosTex"), 0);
+
+            gl.bindVertexArray(vao);
+            gl.drawElementsInstanced(gl.TRIANGLES, sphere.idx.length, gl.UNSIGNED_SHORT, 0, currentCount);
+
+            readIdx = writeIdx;
+
+            frameCount++;
+            if (now - lastTime >= 1000) {
+                document.getElementById("fpsDisplay").innerText = frameCount;
+                frameCount = 0;
+                lastTime = now;
+            }
+            requestAnimationFrame(loop);
+        }
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+</html>
