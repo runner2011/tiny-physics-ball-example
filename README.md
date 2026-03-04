@@ -19,6 +19,7 @@ Perform these tests on your machine and record the average FPS after 10 seconds 
 | 5000       | WebGL2 GPGPU   | 60         | [Pending]    |
 | 10000      | WebGL2 GPGPU   | 30-60      | [Pending]    |
 | 15000      | WebGL2 GPGPU   | 20-30      | [Pending]    |
+| 30000      | WebGL2 GPGPU   | 10-20      | [Pending]    |
 
 ## Usage
 Open any of the following files in a modern web browser:
