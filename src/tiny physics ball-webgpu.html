@@ -224,6 +224,7 @@ async function initWebGPU() {
         primitive: {
             topology: 'triangle-list',
             cullMode: 'back',
+            frontFace: 'cw', // Tell WebGPU your sphere winding is clockwise
         },
         depthStencil: {
             depthWriteEnabled: true,
