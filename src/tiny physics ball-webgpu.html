@@ -159,13 +159,10 @@ async function initWebGPU() {
         };
 
         fn hashColor(id: u32) -> vec3<f32> {
-            var x = id + 100u;
-            x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-            x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-            x = (x >> 16u) ^ x;
-            let r = f32(x & 0xFFu) / 255.0;
-            let g = f32((x >> 8u) & 0xFFu) / 255.0;
-            let b = f32((x >> 16u) & 0xFFu) / 255.0;
+            let f = f32(id);
+            let r = fract(sin(f * 12.9898) * 43758.5453);
+            let g = fract(sin(f * 78.233) * 43758.5453);
+            let b = fract(sin(f * 37.719) * 43758.5453);
             return vec3<f32>(r, g, b);
         }
 
@@ -187,10 +184,7 @@ async function initWebGPU() {
         fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let lightDir = normalize(vec3<f32>(0.5, 1.0, 0.3));
             let diff = max(dot(normalize(in.normal), lightDir), 0.0);
-            // Ambient 0.25 + Diffuse to match WebGL version
-            let ambient = 0.25;
-            let lighting = diff + ambient;
-            return vec4<f32>(in.color * lighting, 1.0);
+            return vec4<f32>(in.color * diff + in.color * 0.2, 1.0);
         }
     `;
 
@@ -379,13 +373,7 @@ async function initWebGPU() {
     }
     function perspective(fov,aspect,near,far){
         const f=1/Math.tan(fov/2);
-        // WebGPU depth range is [0, 1]
-        return [
-            f/aspect, 0, 0, 0,
-            0, f, 0, 0,
-            0, 0, far/(near-far), -1,
-            0, 0, (far*near)/(near-far), 0
-        ];
+        return [f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)/(near-far),-1, 0,0,(2*far*near)/(near-far),0];
     }
     function lookAt(e,t,u){
         const z=normalize(sub(e,t)), x=normalize(cross(u,z)), y=cross(z,x);
